@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TikTok Live Pinned Comments Overlay</title>
+    <style>
+        body {
+            font-family: 'system-ui', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            transition: background-color 0.3s ease;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 550px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        h1 { font-size: 20px; margin: 0; font-weight: 700; color: #f1f1f1; }
+        .status-badge {
+            font-size: 12px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            background-color: #cf6679;
+            color: #000;
+            transition: all 0.3s ease;
+        }
+        .status-badge.active {
+            background-color: #03dac6;
+            color: #000;
+        }
+        .pin-card {
+            background: #1e1e1e;
+            border-left: 5px solid #fe2c55;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            transition: all 0.3s ease;
+        }
+        /* Visual flash animation when a new comment is pinned */
+        .flash {
+            animation: pulse-border 1s ease-out;
+        }
+        @keyframes pulse-border {
+            0% { box-shadow: 0 0 0 0px rgba(254, 44, 85, 0.9); }
+            100% { box-shadow: 0 0 0 25px rgba(254, 44, 85, 0); }
+        }
+        .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #fe2c55;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+        .username {
+            font-size: 16px;
+            font-weight: 600;
+            color: #25f4ee;
+            margin-bottom: 10px;
+        }
+        .comment-text {
+            font-size: 20px;
+            line-height: 1.5;
+            color: #ffffff;
+            word-wrap: break-word;
+        }
+        .history-section {
+            margin-top: 30px;
+        }
+        h3 { font-size: 14px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;}
+        .history-list {
+            background: #181818;
+            border-radius: 8px;
+            max-height: 250px;
+            overflow-y: auto;
+            padding: 10px;
+        }
+        .history-item {
+            padding: 10px;
+            border-bottom: 1px solid #292929;
+            font-size: 14px;
+            animation: fadeIn 0.4s ease;
+        }
+        .history-item:last-child { border-bottom: none; }
+        .history-user { color: #25f4ee; font-weight: 500; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+ 
+<div class="app-container">
+    <div class="header">
+        <h1>TikTok Pin Monitor</h1>
+        <div id="status" class="status-badge">Connecting...</div>
+    </div>
+ 
+    <div id="pin-card" class="pin-card">
+        <div class="label">📌 Pinned Message</div>
+        <div id="username" class="username">Awaiting first pin...</div>
+        <div id="comment-text" class="comment-text">Start your live stream and pin a viewer's comment. It will appear here instantly.</div>
+    </div>
+ 
+    <div class="history-section">
+        <h3>Pin History (This Session)</h3>
+        <div id="history-list" class="history-list"></div>
+    </div>
+</div>
+
+<script>
+    // Elements references
+    const statusBadge = document.getElementById('status');
+    const pinCard = document.getElementById('pin-card');
+    const userElement = document.getElementById('username');
+    const commentElement = document.getElementById('comment-text');
+    const historyList = document.getElementById('history-list');
+
+    // Keep track of what is currently on display so we don't duplicate history logs
+    let currentDisplayUser = "";
+    let currentDisplayComment = "";
+
+    // Connect to your backend node stream engine
+    const eventSource = new EventSource('http://localhost:3000/stream-pins');
+
+    // Triggered when backend successfully opens communications
+    eventSource.onopen = function() {
+        statusBadge.innerText = "● Live Stream Active";
+        statusBadge.classList.add('active');
+    };
+
+    eventSource.onmessage = function(event) {
+        const pinnedData = JSON.parse(event.data);
+        console.log("New Pin Received!", pinnedData);
+
+        // Before replacing, push the old comment to the history section
+        if (currentDisplayUser && currentDisplayUser !== "Awaiting first pin...") {
+            const historyItem = document.createElement('div');
+            historyItem.classList.add('history-item');
+            historyItem.innerHTML = `<span class="history-user">${currentDisplayUser}</span>: "${currentDisplayComment}"`;
+            
+            // Insert newest history element at the top of the history box
+            historyList.insertBefore(historyItem, historyList.firstChild);
+        }
+
+        // Cache the new data for future history tracking
+        currentDisplayUser = '@' + pinnedData.username;
+        currentDisplayComment = pinnedData.commentText;
+
+        // Render the new values onto your layout card
+        userElement.innerText = currentDisplayUser;
+        commentElement.innerText = `"${currentDisplayComment}"`;
+        
+        // Execute the visual card pulse animation wrapper
+        pinCard.classList.remove('flash');
+        void pinCard.offsetWidth; // Clever DOM refresh code trick to restart CSS animation frame cleanly
+        pinCard.classList.add('flash');
+    };
+
+    // Triggered if server.js closes down or restarts
+    eventSource.onerror = function() {
+        console.log("Waiting for server.js to start up...");
+        statusBadge.innerText = "Connecting...";
+        statusBadge.classList.remove('active');
+    };
+</script>
+</body>
+</html>
