@@ -1,6 +1,9 @@
 const path = require('path');
 const { WebcastPushConnection } = require('tiktok-live-connector');
 const express = require('express');
+const fs = require('fs');
+const { print } = require('pdf-to-printer');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 const PORT = 3000;
@@ -10,11 +13,29 @@ let clients = [];
 // ========================================================
 // CONFIGURATION
 // ========================================================
-const TIKTOK_USERNAME = "sorellaph13";
+const TIKTOK_USERNAME = "byyours.truly";
 const USE_REAL_PRINTER = false;
 
 console.log(`[Printer Engine] Starting monitor for @${TIKTOK_USERNAME}...`);
 
+let reconnectAttempts = 0;
+let reconnectTimeout = null;
+
+let lastEventTime= Date.now();
+const MAX_RECONNECT_ATTEMPTS = 20;
+
+// setInterval(() => {
+//     const now = Date.now();
+
+//     if (now - lastEventTime > 90000) {
+//         console.log("⚠️ No activity detected. Forcing reconnect...");
+
+//         try {
+//             tiktokConnection.disconnect();
+//         } catch {}
+//         connectTikTok();
+//     }
+// }, 10000);
 // ========================================================
 // MIDDLEWARE
 // ========================================================
@@ -128,6 +149,7 @@ async function processQueue() {
 const recentPins = new Set();
 
 function handlePinnedEvent(data) {
+     lastEventTime = Date.now();
     const user =
         data.uniqueId ||
         data.user?.uniqueId ||
@@ -154,7 +176,7 @@ function handlePinnedEvent(data) {
 
 const tiktokConnection = new WebcastPushConnection(TIKTOK_USERNAME, {
     processInitialData: false,
-    enableWebsocketUpgrade: true,
+    enableWebsocketUpgrade: false,
     requestOptions: {
         timeout: 15000,
         headers: {
@@ -167,41 +189,65 @@ const tiktokConnection = new WebcastPushConnection(TIKTOK_USERNAME, {
 let isConnecting = false;
 
 function connectTikTok() {
+    
     if (isConnecting) return;
+
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.log("❌ Max reconnect attempts reached. Cooling down 60s...");
+        
+        setTimeout(() => {
+            reconnectAttempts = 0;
+            connectTikTok();
+        }, 60000);
+
+        return;
+    }
+
     isConnecting = true;
+    console.log(`🔄 Connecting... (Attempt ${reconnectAttempts + 1})`);
 
     tiktokConnection.connect()
         .then((state) => {
             isConnecting = false;
+            reconnectAttempts = 0; // ✅ reset on success
+            lastEventTime = Date.now();
 
-            console.log(`\n====================================`);
-            console.log(`[Connected] Watching @${TIKTOK_USERNAME}`);
+            console.log(`\n==============================`);
+            console.log(`[✅ CONNECTED] @${TIKTOK_USERNAME}`);
             console.log(`Room ID: ${state.roomId || "N/A"}`);
-            console.log(`====================================\n`);
+            console.log(`==============================\n`);
         })
         .catch(err => {
             isConnecting = false;
+            reconnectAttempts++;
 
-            console.error(`[Error] ${err.message || err}`);
-            console.log("[Retrying in 10s...]");
+            console.log(`❌ Connection failed (${reconnectAttempts})`);
 
-            setTimeout(connectTikTok, 10000);
+            const delay = Math.min(10000 + reconnectAttempts * 2000, 30000);
+            console.log(`⏳ Retry in ${delay / 1000}s`);
+
+            setTimeout(connectTikTok, delay);
         });
+
 }
 
 connectTikTok();
 
-let reconnectTimeout;
+// let reconnectTimeout;
 
 tiktokConnection.on('disconnected', () => {
-    console.log('[Reconnect] Lost connection');
+    console.log('⚠️ Disconnected from TikTok');
 
     if (reconnectTimeout) return;
 
+    reconnectAttempts++;
+    const delay = Math.min(500 + reconnectAttempts * 2000, 30000);
+
     reconnectTimeout = setTimeout(() => {
         reconnectTimeout = null;
+        console.log(`🔁 Reconnecting in ${delay / 1000}s...`);
         connectTikTok();
-    }, 5000);
+    }, delay);
 });
 
 // ========================================================
@@ -216,13 +262,24 @@ tiktokConnection.on('roomUser', (data) => {
 });
 
 tiktokConnection.on('chat', (data) => {
-    if (
-        data.isPinned ||
-        data.eventAttributes?.isPinned ||
-        data.eventAttributes?.pinnedToTop
-    ) {
-        console.log("📌 PIN CHAT:", data.uniqueId, data.comment);
-        handlePinnedEvent(data);
+    lastEventTime = Date.now();
+
+    const user = data.uniqueId;
+    const text = data.comment?.trim();
+    const isShortMessage = text.length <= 6;
+    const containsNumber = /\d/.test(text);
+
+    if (!text) return;
+
+    // ✅ STRICT PIN DETECTION ONLY
+    const isPinned =
+        data.isPinned === true ||
+        data.eventAttributes?.isPinned === true ||
+        data.eventAttributes?.pinnedToTop === true;
+
+    if (isPinned || (isShortMessage && containsNumber)) {
+        console.log("📌 REAL/LIKELY PIN:", user, "→", text);
+        enqueueJob(user, text);
     }
 });
 
@@ -234,9 +291,36 @@ tiktokConnection.on('error', (err) => {
 // REAL PRINTER (SAFE PLACEHOLDER)
 // ========================================================
 async function realPrint(username, commentText) {
-    console.log("🖨️ Real printer not configured yet");
-}
+    return new Promise((resolve, reject) => {
+        const filePath = path.join(__dirname, `ticket-${Date.now()}.pdf`);
+        const doc = new PDFDocument({ size: [220, 300] }); // receipt size
 
+        const stream = fs.createWriteStream(filePath);
+        doc.pipe(stream);
+
+        doc.fontSize(12).text('📌 TIKTOK PIN', { align: 'center' });
+        doc.moveDown();
+        doc.text(`User: ${username}`);
+        doc.moveDown();
+        doc.text(commentText);
+        doc.moveDown();
+        doc.text('------------------------', { align: 'center' });
+
+        doc.end();
+
+        stream.on('finish', async () => {
+            try {
+                await print(filePath); // ✅ default printer
+                console.log("✅ Printed via default printer");
+
+                fs.unlinkSync(filePath); // cleanup
+                resolve();
+            } catch (err) {
+                reject(err);
+            }
+        });
+    });
+}
 // ========================================================
 // SIMULATED PRINTER
 // ========================================================
