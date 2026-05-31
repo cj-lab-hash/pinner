@@ -13,7 +13,7 @@ let clients = [];
 // ========================================================
 // CONFIGURATION
 // ========================================================
-const TIKTOK_USERNAME = "byyours.truly";
+const TIKTOK_USERNAME = "jsjdenimcollection";
 const USE_REAL_PRINTER = false;
 
 console.log(`[Printer Engine] Starting monitor for @${TIKTOK_USERNAME}...`);
@@ -22,7 +22,7 @@ let reconnectAttempts = 0;
 let reconnectTimeout = null;
 
 let lastEventTime= Date.now();
-const MAX_RECONNECT_ATTEMPTS = 20;
+const MAX_RECONNECT_ATTEMPTS = 8;
 
 // setInterval(() => {
 //     const now = Date.now();
@@ -178,10 +178,12 @@ const tiktokConnection = new WebcastPushConnection(TIKTOK_USERNAME, {
     processInitialData: false,
     enableWebsocketUpgrade: false,
     requestOptions: {
-        timeout: 15000,
+        timeout: 20000,
         headers: {
-            'User-Agent': 'Mozilla/5.0',
-            'Referer': 'https://www.tiktok.com/'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Referer': 'https://www.tiktok.com/',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive'
         }
     }
 });
@@ -292,28 +294,40 @@ tiktokConnection.on('error', (err) => {
 // ========================================================
 async function realPrint(username, commentText) {
     return new Promise((resolve, reject) => {
-        const filePath = path.join(__dirname, `ticket-${Date.now()}.pdf`);
-        const doc = new PDFDocument({ size: [220, 300] }); // receipt size
+        const filePath = path.join(__dirname, `receipt-${Date.now()}.pdf`);
+        const doc = new PDFDocument({ size: [220, 300], margin: 10 });
 
         const stream = fs.createWriteStream(filePath);
         doc.pipe(stream);
 
-        doc.fontSize(12).text('📌 TIKTOK PIN', { align: 'center' });
+        const timestamp = new Date().toLocaleTimeString();
+
+        // Title
+        doc.fontSize(14).text("🧾 ORDER TICKET", { align: "center" });
         doc.moveDown();
-        doc.text(`User: ${username}`);
+
+        // Divider
+        doc.fontSize(10).text("----------------------------", { align: "center" });
         doc.moveDown();
-        doc.text(commentText);
+
+        // Content
+        doc.fontSize(10).text(`USER : @${username}`);
+        doc.text(`ORDER: ${commentText}`);
+        doc.text(`TIME : ${timestamp}`);
+
         doc.moveDown();
-        doc.text('------------------------', { align: 'center' });
+        doc.text("----------------------------", { align: "center" });
+
+        doc.moveDown();
+        doc.fontSize(9).text("TikTok Live Order Feed", { align: "center" });
 
         doc.end();
 
         stream.on('finish', async () => {
             try {
-                await print(filePath); // ✅ default printer
-                console.log("✅ Printed via default printer");
-
+                await print(filePath); // ✅ sends to default printer
                 fs.unlinkSync(filePath); // cleanup
+                console.log("🖨️ Printed receipt");
                 resolve();
             } catch (err) {
                 reject(err);
@@ -328,14 +342,29 @@ function simulateTerminalPrint(username, commentText) {
     return new Promise((resolve) => {
         const timestamp = new Date().toLocaleTimeString();
 
-        console.log(`\n🖨️ Printing for @${username}`);
-        console.log(`Time: ${timestamp}`);
-        console.log(`"${commentText}"`);
+        const lineWidth = 28;
+
+        function padLine(label, value) {
+            const text = `${label} ${value}`;
+            return text.padEnd(lineWidth, ' ');
+        }
+
+        console.log("\n🖨️  Printing Receipt...\n");
+
+        console.log("┌" + "─".repeat(lineWidth) + "┐");
+        console.log("│" + "🧾 ORDER TICKET".padStart(19).padEnd(lineWidth) + "│");
+        console.log("├" + "─".repeat(lineWidth) + "┤");
+        console.log("│" + padLine("USER :", "@" + username).slice(0, lineWidth) + "│");
+        console.log("│" + padLine("ORDER:", commentText).slice(0, lineWidth) + "│");
+        console.log("│" + padLine("TIME :", timestamp).slice(0, lineWidth) + "│");
+        console.log("├" + "─".repeat(lineWidth) + "┤");
+        console.log("│" + "TikTok Live Order Feed".padEnd(lineWidth) + "│");
+        console.log("└" + "─".repeat(lineWidth) + "┘\n");
 
         setTimeout(() => {
-            console.log("[Done Printing]");
+            console.log("[✅ Receipt Printed]");
             resolve();
-        }, 1500);
+        }, 1000);
     });
 }
 
