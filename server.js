@@ -1,4 +1,3 @@
-const fs = require('fs');
 const path = require('path');
 const { WebcastPushConnection } = require('tiktok-live-connector');
 const express = require('express');
@@ -9,68 +8,116 @@ const PORT = 3000;
 let clients = [];
 
 // ========================================================
-// CONFIGURATION (Set to a creator who is LIVE right now)
+// CONFIGURATION
 // ========================================================
-const TIKTOK_USERNAME = "sorellaph13"; 
+const TIKTOK_USERNAME = "sorellaph13";
+const USE_REAL_PRINTER = false;
 
 console.log(`[Printer Engine] Starting monitor for @${TIKTOK_USERNAME}...`);
 
+// ========================================================
+// MIDDLEWARE
+// ========================================================
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     next();
 });
 
-// Create the data stream pathway for your HTML file to listen to
+// ========================================================
+// SSE STREAM
+// ========================================================
 app.get('/stream-pins', (req, res) => {
-    // 1. Send the official 200 OK handshake immediately
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
     });
-    
+
     clients.push(res);
-    console.log(`[Dashboard Connected] A monitoring window just opened! (Total: ${clients.length})`);
-    
-    // 2. Send a tiny invisible "ping" so the browser knows the line is officially open
-    res.write(': ping\n\n');
-    
+    console.log(`[Dashboard Connected] Total: ${clients.length}`);
+
+    const interval = setInterval(() => {
+        res.write(': keep-alive\n\n');
+    }, 15000);
+
     req.on('close', () => {
+        clearInterval(interval);
         clients = clients.filter(client => client !== res);
-        console.log(`[Dashboard Disconnected] Window closed. (Total: ${clients.length})`);
+        console.log(`[Dashboard Disconnected] Total: ${clients.length}`);
     });
 });
-app.listen(PORT, () => {
-    console.log(`[Data Server Online] Listening for dashboard connections on port ${PORT}`);
-});
+
+// ========================================================
+// ROUTES
+// ========================================================
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: "ok",
+        clients: clients.length,
+        queue: queue.length,
+        isPrinting
+    });
+});
+
+app.listen(PORT, () => {
+    console.log(`[Data Server Online] Listening on port ${PORT}`);
+});
+
+// ========================================================
+// SEND DATA TO DASHBOARD
+// ========================================================
 function sendPinToHtmlDashboard(username, commentText) {
     const dataPayload = JSON.stringify({ username, commentText });
-    clients.forEach(client => client.write(`data: ${dataPayload}\n\n`));
+
+    clients = clients.filter(client => {
+        try {
+            client.write(`data: ${dataPayload}\n\n`);
+            return true;
+        } catch {
+            return false;
+        }
+    });
 }
 
 // ========================================================
-// PRINT QUEUE SYSTEM (Simulated for testing)
+// PRINT QUEUE SYSTEM
 // ========================================================
 let isPrinting = false;
 let queue = [];
+const MAX_QUEUE = 50;
 
 function enqueueJob(user, text) {
+    if (queue.length >= MAX_QUEUE) {
+        console.log("⚠️ Queue full, skipping...");
+        return;
+    }
+
     queue.push({ user, text });
-    processQueue();
     sendPinToHtmlDashboard(user, text);
+    processQueue();
 }
 
 async function processQueue() {
     if (isPrinting || queue.length === 0) return;
+
     isPrinting = true;
     const job = queue.shift();
-    
-    // Simulate the time it takes for a printer to physically roll out paper (1.5 seconds)
-    await simulateTerminalPrint(job.user, job.text);
-    
+
+    try {
+        if (USE_REAL_PRINTER) {
+            await realPrint(job.user, job.text);
+        } else {
+            await simulateTerminalPrint(job.user, job.text);
+        }
+    } catch (err) {
+        console.error("Print failed:", err);
+    }
+
     isPrinting = false;
     processQueue();
 }
@@ -78,103 +125,140 @@ async function processQueue() {
 // ========================================================
 // TIKTOK CONNECTION
 // ========================================================
+const recentPins = new Set();
+
+function handlePinnedEvent(data) {
+    const user =
+        data.uniqueId ||
+        data.user?.uniqueId ||
+        data.user?.displayId ||
+        data.user?.nickname ||
+        "Anonymous";
+
+    const text =
+        data.comment ||
+        data.content ||
+        data.title ||
+        "No text available";
+
+    const id = `${user}:${text}`;
+
+    if (recentPins.has(id)) return;
+    recentPins.add(id);
+
+    setTimeout(() => recentPins.delete(id), 5000);
+
+    console.log("📌 PIN DETECTED:", user, text);
+    enqueueJob(user, text);
+}
+
 const tiktokConnection = new WebcastPushConnection(TIKTOK_USERNAME, {
-    processInitialData: true,
-    enableWebsocketUpgrade: false,
+    processInitialData: false,
+    enableWebsocketUpgrade: true,
     requestOptions: {
-        timeout: 10000,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        timeout: 15000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0',
+            'Referer': 'https://www.tiktok.com/'
+        }
     }
 });
 
+let isConnecting = false;
+
 function connectTikTok() {
+    if (isConnecting) return;
+    isConnecting = true;
+
     tiktokConnection.connect()
-        .then(() => {
-            console.log(`\n==================================================`);
-            console.log(`[Connected] Successfully watching @${TIKTOK_USERNAME}!`);
-            console.log(`Waiting for a comment to be pinned on TikTok...`);
-            console.log(`==================================================\n`);
+        .then((state) => {
+            isConnecting = false;
+
+            console.log(`\n====================================`);
+            console.log(`[Connected] Watching @${TIKTOK_USERNAME}`);
+            console.log(`Room ID: ${state.roomId || "N/A"}`);
+            console.log(`====================================\n`);
         })
         .catch(err => {
-            console.error(`[Error] Connection Failed: ${err.message || err}`);
-            console.log(`[Retry] Attempting to reconnect in 10 seconds...`);
+            isConnecting = false;
+
+            console.error(`[Error] ${err.message || err}`);
+            console.log("[Retrying in 10s...]");
+
             setTimeout(connectTikTok, 10000);
         });
 }
+
 connectTikTok();
 
+let reconnectTimeout;
+
 tiktokConnection.on('disconnected', () => {
-    console.log('[Reconnect] Connection lost. Reconnecting in 5s...');
-    setTimeout(connectTikTok, 5000);
+    console.log('[Reconnect] Lost connection');
+
+    if (reconnectTimeout) return;
+
+    reconnectTimeout = setTimeout(() => {
+        reconnectTimeout = null;
+        connectTikTok();
+    }, 5000);
 });
 
 // ========================================================
 // EVENT LISTENERS
 // ========================================================
+tiktokConnection.on('roomPin', handlePinnedEvent);
+
 tiktokConnection.on('roomUser', (data) => {
     if (data.pinnedMessage) {
-        const user = data.pinnedMessage.user?.displayId || data.pinnedMessage.user?.nickname || "Anonymous";
-        const text = data.pinnedMessage.content;
-        enqueueJob(user, text);
+        handlePinnedEvent(data.pinnedMessage);
     }
 });
 
 tiktokConnection.on('chat', (data) => {
-    const isPinned = data.isPinned || data.eventAttributes?.isPinned || data.eventAttributes?.pinnedToTop;
-    if (isPinned) {
-        enqueueJob(data.uniqueId, data.comment);
+    if (
+        data.isPinned ||
+        data.eventAttributes?.isPinned ||
+        data.eventAttributes?.pinnedToTop
+    ) {
+        console.log("📌 PIN CHAT:", data.uniqueId, data.comment);
+        handlePinnedEvent(data);
     }
 });
-// ========================================================
-// THE DEDICATED PIN CATCHER
-// ========================================================
-tiktokConnection.on('roomPin', (data) => {
-    // 1. Alert the terminal that a pin was caught!
-    console.log(`\n🚨 [DEBUG] PIN EVENT DETECTED BY TIKTOK API!`);
-    
-    // 2. Extract the data (TikTok's data structure changes sometimes, so we check a few spots)
-    const pinnedData = data.pinMessage || data.pinnedMessage || data;
-    
-    // 3. Dig out the username and text
-    const user = pinnedData.user?.displayId || pinnedData.user?.nickname || "Anonymous";
-    const text = pinnedData.content || pinnedData.comment || pinnedData.title || "No text available";
-    
-    // 4. Send it to the printer and dashboard!
-    enqueueJob(user, text);
+
+tiktokConnection.on('error', (err) => {
+    console.error('[TikTok Error]', err);
 });
+
 // ========================================================
-// VISUAL TERMINAL LOGGING (Your Simulated Printer)
+// REAL PRINTER (SAFE PLACEHOLDER)
+// ========================================================
+async function realPrint(username, commentText) {
+    console.log("🖨️ Real printer not configured yet");
+}
+
+// ========================================================
+// SIMULATED PRINTER
 // ========================================================
 function simulateTerminalPrint(username, commentText) {
     return new Promise((resolve) => {
-        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        
-        console.log(`\n🖨️  [VIRTUAL PRINTER] Spooling ticket for @${username}...`);
-        console.log(`┌────────────────────────────────────────────────┐`);
-        console.log(`│ 📌 TIKTOK LIVE PIN TICKET         ⏰ ${timestamp} │`);
-        console.log(`├────────────────────────────────────────────────┤`);
-        console.log(`│ USER: @${username.padEnd(39)} │`);
-        
-        // Wrap text cleanly if the comment is long
-        const maxLineLength = 45;
-        let text = commentText;
-        while (text.length > 0) {
-            let chunk = text.slice(0, maxLineLength);
-            text = text.slice(maxLineLength);
-            console.log(`│ "${chunk.padEnd(44)}" │`);
-        }
-        
-        console.log(`├────────────────────────────────────────────────┤`);
-        console.log(`│    Live Stream Order / Interaction Ticket      │`);
-        console.log(`└────────────────────────────────────────────────┘\n`);
-        
+        const timestamp = new Date().toLocaleTimeString();
+
+        console.log(`\n🖨️ Printing for @${username}`);
+        console.log(`Time: ${timestamp}`);
+        console.log(`"${commentText}"`);
+
         setTimeout(() => {
-            console.log(`[Printer Success] Ticket printed smoothly.`);
+            console.log("[Done Printing]");
             resolve();
-        }, 1500); 
+        }, 1500);
     });
 }
+
+// ========================================================
+// TEST PIN
+// ========================================================
 setTimeout(() => {
-    console.log(`\n🧪 [TEST] Simulating a fake pin in 5 seconds...`);
-    enqueueJob("test_user_99", "Hello! This is a test to make sure the dashboard works!");
+    console.log("\n🧪 Test pin firing...");
+    enqueueJob("test_user", "This is a test pin ✅");
 }, 5000);
